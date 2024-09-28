@@ -794,12 +794,12 @@ def main(arg_list: List[str]) -> None:
         Assumes that the file can be built with 'make' to create an .o file.""",
     )
     parser.add_argument(
-        "asm_file_or_func_name",
-        metavar="{asm_file|func_name}",
-        help="""File containing assembly for the function.
-        Must start with 'glabel <function_name>' and contain no other functions.
-        Alternatively, a function name can be given, which will be looked for in
-        all GLOBAL_ASM blocks in the C file.""",
+        "o_file",
+        help="""File containing the target object for the function.""",
+    )
+    parser.add_argument(
+        "func_name",
+        help="""The function to permute.""",
     )
     parser.add_argument(
         "make_flags",
@@ -828,13 +828,6 @@ def main(arg_list: List[str]) -> None:
         affects the generated assembly asm it can be necessary to turn off.
         Note that regardless of this setting the permuter always removes all
         other functions by replacing them with declarations.""",
-    )
-    parser.add_argument(
-        "--decompme",
-        dest="decompme",
-        action="store_true",
-        help="""Upload the function to decomp.me to share with other people,
-        instead of importing.""",
     )
     args = parser.parse_args(arg_list)
 
@@ -883,7 +876,7 @@ def main(arg_list: List[str]) -> None:
             "please set 'compiler_type' in this project's permuter_settings.toml."
         )
 
-    func_name, asm_cont = parse_asm(root_dir, args.c_file, args.asm_file_or_func_name)
+    func_name = args.func_name
     print(f"Function name: {func_name}")
 
     if compiler_str or assembler_str:
@@ -905,46 +898,11 @@ def main(arg_list: List[str]) -> None:
     )
     source = import_c_file(compiler, root_dir, args.c_file, preserve_macros)
 
-    if args.decompme:
-        api_base = os.environ.get("DECOMPME_API_BASE", "https://decomp.me")
-        compiler_name = get_decompme_compiler_name(compiler, settings, api_base)
-        source, context = prune_and_separate_context(source, args.prune, func_name)
-        print("Uploading...")
-        try:
-            post_data = urllib.parse.urlencode(
-                {
-                    "name": func_name,
-                    "target_asm": asm_cont,
-                    "context": context,
-                    "source_code": source,
-                    "compiler": compiler_name,
-                    "compiler_flags": get_compiler_flags(compiler),
-                    "diff_label": func_name,
-                }
-            ).encode("ascii")
-            with urllib.request.urlopen(f"{api_base}/api/scratch", post_data) as f:
-                resp = f.read()
-                json_data: Dict[str, str] = json.loads(resp)
-                if "slug" in json_data:
-                    slug = json_data["slug"]
-                    token = json_data.get("claim_token")
-                    if token:
-                        print(f"https://decomp.me/scratch/{slug}/claim?token={token}")
-                    else:
-                        print(f"https://decomp.me/scratch/{slug}")
-                else:
-                    error = json_data.get("error", resp)
-                    print(f"Server error: {error}")
-        except Exception as e:
-            print(e)
-        return
-
     source, compilable_source = prune_source(source, args.prune, func_name)
 
     dirname = create_directory(func_name)
     base_c_file = f"{dirname}/base.c"
     base_o_file = f"{dirname}/base.o"
-    target_s_file = f"{dirname}/target.s"
     target_o_file = f"{dirname}/target.o"
     compile_script = f"{dirname}/compile.sh"
     settings_file = f"{dirname}/settings.toml"
@@ -953,8 +911,7 @@ def main(arg_list: List[str]) -> None:
         write_to_file(source, base_c_file)
         create_write_settings_toml(func_name, compiler_type, settings_file)
         write_compile_command(compiler, root_dir, compile_script)
-        write_asm(asm_prelude_file, asm_cont, target_s_file)
-        compile_asm(assembler, root_dir, target_s_file, target_o_file)
+        shutil.copy(args.o_file, target_o_file)
         if compilable_source is not None:
             compile_base(compile_script, compilable_source, base_c_file, base_o_file)
     except:
