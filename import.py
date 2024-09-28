@@ -531,8 +531,14 @@ def import_c_file(
         "-DNON_MATCHING",
         "-DNONMATCHING",
         "-DPERMUTER",
-        "-D_MIPS_SZINT=32",
-        "-D_MIPS_SZLONG=32",
+        "-I",
+        "tools/agbcc/include",
+        "-I",
+        "tools/agbcc",
+        "-iquote",
+        "include",
+        "-nostdinc",
+        "-undef",
     ]
 
     for arg in compiler:
