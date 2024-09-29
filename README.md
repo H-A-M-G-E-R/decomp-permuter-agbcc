@@ -1,4 +1,4 @@
-# Decomp permuter
+# decomp-permuter-agbcc
 
 Automatically permutes C files to better match a target binary. The permuter has two modes of operation:
 - Random: purely at random, introduce temporary variables for values, change types, put statements on the same line...
@@ -8,7 +8,133 @@ The modes can also be combined, by using the `PERM_RANDOMIZE` macro.
 
 [<img src="https://asciinema.org/a/232846.svg" height="300">](https://asciinema.org/a/232846)
 
-This tool supports MIPS (compiled by IDO, possibly GCC), PowerPC, and ARM32 assembly.
+This tool supports ARMv4T assembly compiled by agbcc. For MIPS, PowerPC, and other AArch32 assembly support; please see [the upstream project](https://github.com/simonlindholm/decomp-permuter).
+
+## Prerequisites
+
+You will need to install some prerequisites:
+
+* For pip-managed environments: `python3 -m pip install pycparser toml Levenshtein`
+* For externally-managed environments with apt: `sudo apt install python3-pycparser python3-toml python3-levenshtein`
+
+For Python 3.6 or earlier, you will also need to install `dataclasses`.
+
+Levenshtein is an optional dependency and may be omitted (the default diff algorithm is difflib).
+
+## Setup
+
+This setup will need to be performed once per project. It is assumed you are using git for version control. It is assumed that all code is either decompiled or disassembled into `.s` files; no code should exclusively be in `.o` files or included from the base ROM. It is acceptable for data to still be included from the base ROM.
+
+The setup process is NOT plug-and-play. Parts of the setup process will need to be adapted to your project.
+
+### Step 1: Create a new branch
+
+*Beyond this point, do not interact with git unless instructed to do so.*
+
+If you are setting up the permuter for everyone who works on the project, create a new branch from the default upstream branch, then continue to step 2.
+
+If you are setting up the permuter for only yourself, switch to the branch that you wish to add permuter support to, then make a new commit. The setup process will partially destroy the project directory. As such, it is critical that you create a commit before continuing with the setup process. A later step in the setup process will instruct you to revert all changes made since this commit.
+
+### Step 2: Create two working directories
+
+Create two temporary working directories *outside* of the project directory. It is recommended that you create these directories as siblings of the project directory, but you may create them anywhere as long as you remember their locations, and they are not inside the project directory. Do not include a space in either directory's full path.
+
+### Step 3: Split .s files
+
+1. Move (not copy) a `.s` file from the project directory to the first working directory.
+2. Split this `.s` file such that each function is in its own file, plus one file for the header. As an example, if each function in the `.s` file begins with `thumb_func_start`, then a command to split this `.s` file appropriately would be `csplit --digits=3 filename.s /thumb_func_start/ '{*}'`. This command will need to be adjusted if you have 1000 or more functions in the `.s` file, or if some functions start with alternative macros (like `arm_func_start` or `non_word_aligned_thumb_func_start`).
+3. Concatenate the header onto each function file. If you used `csplit`, this may look like `mv xx000 header; for filename in ./xx*; do cat header $filename | sponge $filename; done`.
+4. Rename the function files so that each file is `name_of_function.s`. This may look something like `for filename in ./xx*; do mv $filename "$(head -1 $filename | cut -c 19-)".s; done`. Note that the `19` is *not* plug-and-play friendly; you will need to experiment to determine the correct number. Make sure that there is not a leading space in the output of the `head -1 file | cut -c 19-` portion.
+5. Move (not copy) all single-function `.s` files from the first working directory to the second working directory. If the original `.s` file or the header file still exist, delete them at this time. At the end of this step, the first working directory should be empty, and the second working directory should only contain `.s` files with exactly one function.
+6. Repeat for all `.s` files in the project directory that contain functions.
+
+### Step 4: Compile .s files to .o files
+
+1. Move all `.s` files from the second working directory to the appropriate location within the project directory.
+2. Run the standard build command for your project (typically `make`). It is expected that this command will end with an error. If necessary, modify your build command/pipeline so that all build artifacts are kept.
+3. Navigate to your project's build directory, and ensure that each `.s` file has a corresponding `.o` file in the build directory. If you have less `.o` files than expected, see below for troubleshooting steps.
+4. Move all `.o` files from the project directory to the first working directory. (Ignore `.o` files from sources other than the single-function `.s` files.)
+5. Run the standard cleanup command for your project (typically `make clean`). If multiple levels of cleanup exist, it is recommended to use the most extreme version (i.e., prefer `make clean` to `make tidy`).
+
+### Step 5: Revert to commit
+
+Discard all changes made since the commit made in step 1. If you are using GitHub Desktop, this can be accomplished by right-clicking on `{number} changed files`, then selecting "Discard all changes...".
+
+### Step 6: Move .o files to project directory
+
+Create a new subdirectory in your project directory. The recommended name is `expected_objs` or something similar, and it is recommended to put it in the root of the project directory, but you may ignore these recommendations. Move all `.o` files from the first working directory to this new subdirectory.
+
+### Step 7: Create the permuter config file
+
+Create a new file in the root of your project directory named `permuter_settings.toml`. In this file, add the following lines, replacing `$(CC)`, `$(CFLAGS)`, etc. with their values for your project:
+
+```
+compiler_type = "gcc"
+compiler_command = "$(CC) $(CFLAGS) -o /dev/stdout | $(AS) $(ASFLAGS)"
+assembler_command = "$(AS) $(ASFLAGS)"
+```
+
+For example, pokepinballrs's `permuter_settings.toml` looks like this:
+
+```
+compiler_type = "gcc"
+compiler_command = "tools/agbcc/bin/agbcc -mthumb-interwork -Wimplicit -Wparentheses -Werror -O2 -fhex-asm -fprologue-bugfix -o /dev/stdout | arm-none-eabi-as -mcpu=arm7tdmi"
+assembler_command = "arm-none-eabi-as -mcpu=arm7tdmi"
+```
+
+In most instances, decomp-permuter-agbcc will handle C preprocessor flags (`$(CPPFLAGS)`) for you. In the event that the incorrect preprocessor flags are used, you will need to edit `import.py` manually.
+
+### Step 8: (Optional) Create the objdiff config file
+
+At this point, adding objdiff support to your project is trivial. To add objdiff support, create a new file in the root of your project named `objdiff.json`. In this file, add the following lines, replacing the values of `"target_dir"` and `"base_dir"` to match your project's directory structure:
+
+```
+{
+  "$schema": "https://raw.githubusercontent.com/encounter/objdiff/main/config.schema.json",
+  "target_dir": "expected_objs",
+  "build_target": false,
+  "base_dir": "build/pokepinballrs/src",
+  "build_base": true,
+  "watch_patterns": [
+    "*.c",
+    "*.cp",
+    "*.cpp",
+    "*.cxx",
+    "*.h",
+    "*.hp",
+    "*.hpp",
+    "*.hxx",
+    "*.s",
+    "*.S",
+    "*.asm",
+    "*.inc",
+    "*.py",
+    "*.yml",
+    "*.txt",
+    "*.json"
+  ]
+}
+```
+
+### Step 9: Update .gitignore
+
+If you are setting up the permuter for only yourself, skip this step.
+
+Add the following lines to your `.gitignore` file, adjusting the path as necessary:
+
+```
+!expected_objs/*.o
+!permuter_settings.toml
+!objdiff.json
+```
+
+You should now see all the `.o` files from step 6 and the config files from steps 7 and 8 in `git status` or in your GUI client. Commit the changes, and publish the branch.
+
+### Step 10: Cleanup
+
+You may now delete both working directories.
+
+You may now resume interacting with git as normal.
 
 ## Usage
 
