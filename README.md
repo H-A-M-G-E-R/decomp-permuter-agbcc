@@ -29,7 +29,7 @@ The setup process is NOT plug-and-play. Parts of the setup process will need to 
 
 ### Step 1: Create a new branch
 
-*Beyond this point, do not interact with git unless instructed to do so.*
+*Beyond this point, do not interact with git unless instructed to do so. Doing so may have unintended consequences.*
 
 If you are setting up the permuter for everyone who works on the project, create a new branch from the default upstream branch, then continue to step 2.
 
@@ -161,7 +161,7 @@ Add the following lines to your `.gitignore` file, adjusting the path as necessa
 !objdiff.json
 ```
 
-You should now see all the `.o` files from step 6 and the config files from steps 7 and 8 in `git status` or in your GUI client. Commit the changes, and publish the branch.
+You should now see all the `.o` files from step 6 and the config files from steps 7 and 8 in `git status` or in your GUI client. Commit the changes and publish the branch.
 
 ### Step 10: Cleanup
 
