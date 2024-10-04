@@ -10,7 +10,17 @@ import sys
 import threading
 import time
 
-from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from .candidate import CandidateResult
 from .compiler import Compiler
@@ -58,6 +68,7 @@ class Options:
     show_timings: bool = False
     print_diffs: bool = False
     stack_differences: bool = False
+    algorithm: str = "difflib"
     abort_exceptions: bool = False
     better_only: bool = False
     best_only: bool = False
@@ -96,6 +107,8 @@ class EvalContext:
     printer: Printer = field(default_factory=Printer)
     iteration: int = 0
     errors: int = 0
+    internal_errors: int = 0
+    internal_error_stack_traces: Set[str] = field(default_factory=set)
     overall_profiler: Profiler = field(default_factory=Profiler)
     permuters: List[Permuter] = field(default_factory=list)
 
@@ -132,7 +145,11 @@ def post_score(
     context: EvalContext, permuter: Permuter, result: EvalResult, who: Optional[str]
 ) -> bool:
     if isinstance(result, EvalError):
+        context.internal_errors += 1
         if result.exc_str is not None:
+            if result.exc_str in context.internal_error_stack_traces:
+                return False
+            context.internal_error_stack_traces.add(result.exc_str)
             context.printer.print(
                 "internal permuter failure.", permuter, who, keep_progress=True
             )
@@ -166,10 +183,13 @@ def post_score(
         context.errors += 1
     else:
         disp_score = str(score_value)
-    timings = ""
+
+    status_line = f"iteration {context.iteration}, {context.errors} errors, "
+    if context.internal_errors:
+        status_line += f"{context.internal_errors} permuter failures, "
+    status_line += f"score = {disp_score}"
     if context.options.show_timings:
-        timings = "  \t" + context.overall_profiler.get_str_stats()
-    status_line = f"iteration {context.iteration}, {context.errors} errors, score = {disp_score}{timings}"
+        status_line += "  \t" + context.overall_profiler.get_str_stats()
 
     if permuter.should_output(result):
         former_best = permuter.best_score
@@ -331,6 +351,7 @@ def run_inner(options: Options, heartbeat: Callable[[], None]) -> List[int]:
         scorer = Scorer(
             target_o,
             stack_differences=options.stack_differences,
+            algorithm=options.algorithm,
             debug_mode=options.debug_mode,
         )
         c_source = preprocess(base_c)
@@ -651,6 +672,13 @@ def main() -> None:
         help="Take stack differences into account when computing the score.",
     )
     parser.add_argument(
+        "--algorithm",
+        dest="algorithm",
+        default="difflib",
+        choices=["difflib", "levenshtein"],
+        help="Diff algorithm to use",
+    )
+    parser.add_argument(
         "--keep-prob",
         dest="keep_prob",
         metavar="PROB",
@@ -728,6 +756,7 @@ def main() -> None:
         best_only=args.best_only,
         quiet=args.quiet,
         stack_differences=args.stack_differences,
+        algorithm=args.algorithm,
         stop_on_zero=args.stop_on_zero,
         keep_prob=args.keep_prob,
         force_seed=args.force_seed,

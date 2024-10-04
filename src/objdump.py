@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass, field
+from functools import lru_cache
 import os
 import re
 import string
 import subprocess
 import sys
+import shutil
 from typing import List, Match, Pattern, Set, Tuple, Optional
 
 
@@ -24,8 +26,8 @@ ign_branch_targets = True
 skip_bl_delay_slots = False
 
 skip_lines = 1
-re_int = re.compile(r"[0-9]+")
-re_int_full = re.compile(r"\b[0-9]+\b")
+re_int = re.compile(r"-?[0-9]+")
+re_int_full = re.compile(r"\b-?[0-9]+\b")
 
 
 @dataclass
@@ -38,7 +40,8 @@ class Line:
 @dataclass
 class ArchSettings:
     name: str
-    objdump: List[str]
+    executable: List[str]
+    arguments: List[str]
     re_comment: Pattern[str]
     re_reg: Pattern[str]
     re_sprel: Pattern[str]
@@ -131,7 +134,6 @@ ARM32_BRANCH_INSTRUCTIONS = {
     for suffix in ARM32_SUFFIXES
 }
 
-
 MIPS_SETTINGS: ArchSettings = ArchSettings(
     name="mips",
     re_comment=re.compile(r"<.*?>"),
@@ -142,7 +144,12 @@ MIPS_SETTINGS: ArchSettings = ArchSettings(
     re_includes_sp=re.compile(r"\b(sp|s8)\b"),
     sp_ref_insns=["addiu"],
     reloc_str="R_MIPS_",
-    objdump=["mips-linux-gnu-objdump", "-drz", "-m", "mips:4300"],
+    executable=[
+        "mips-linux-gnu-objdump",
+        "mips64-linux-gnu-objdump",
+        "mips64-elf-objdump",
+    ],
+    arguments=["-drz", "-m", "mips:4300"],
     branch_likely_instructions=MIPS_BRANCH_LIKELY_INSTRUCTIONS,
     branch_instructions=MIPS_BRANCH_INSTRUCTIONS,
 )
@@ -156,7 +163,8 @@ PPC_SETTINGS: ArchSettings = ArchSettings(
     re_reg=re.compile(r"\$?\b([rf](?:[02-9]|[1-9][0-9]+)|f1)\b"),  # leave out r1
     re_sprel=re.compile(r"(?<=,)(-?[0-9]+|-?0x[0-9a-f]+)\(r1\)"),
     reloc_str="R_PPC_",
-    objdump=["powerpc-eabi-objdump", "-dr", "-EB", "-mpowerpc", "-M", "broadway"],
+    executable=["powerpc-eabi-objdump"],
+    arguments=["-dr", "-EB", "-mpowerpc", "-M", "broadway"],
     branch_instructions=PPC_BRANCH_INSTRUCTIONS,
     branch_likely_instructions=PPC_BRANCH_LIKELY_INSTRUCTIONS,
 )
@@ -177,7 +185,8 @@ ARM32_SETTINGS: ArchSettings = ArchSettings(
     ),
     re_sprel=re.compile(r"sp, #-?(0x[0-9a-fA-F]+|[0-9]+)\b"),
     reloc_str="R_ARM_",
-    objdump=["arm-none-eabi-objdump", "-drz"],
+    executable=["arm-none-eabi-objdump"],
+    arguments=["-drz"],
     branch_instructions=ARM32_BRANCH_INSTRUCTIONS,
     branch_likely_instructions=set(),
 )
@@ -246,6 +255,8 @@ def pre_process(mnemonic: str, args: str, next_row: Optional[str]) -> Tuple[str,
 
 
 def process_mips_reloc(reloc_row: str, prev: str, repl: str, imm: str) -> str:
+    if "R_MIPS_JALR" in reloc_row or "R_MIPS_NONE" in reloc_row:
+        return repl
     # Sometimes s8 is used as a non-framepointer, but we've already lost
     # the immediate value by pretending it is one. This isn't too bad,
     # since it's rare and applies consistently. But we do need to handle it
@@ -419,10 +430,27 @@ def simplify_objdump(
     return output_lines
 
 
+@lru_cache
+def find_executable(arch_executable: Tuple[str, ...], arch_name: str) -> str:
+    executable = None
+    for cand in arch_executable:
+        if shutil.which(cand):
+            executable = cand
+            break
+    if executable is None:
+        raise Exception(
+            "Could not find any objdump executables: "
+            f"[{', '.join(arch_executable)}] for {arch_name}. "
+            "Make sure you have installed the toolchain for the target architecture."
+        )
+    return executable
+
+
 def objdump(
     o_filename: str, arch: ArchSettings, *, stack_differences: bool = False
 ) -> List[Line]:
-    output = subprocess.check_output(arch.objdump + [o_filename])
+    executable = find_executable(tuple(arch.executable), arch.name)
+    output = subprocess.check_output([executable] + arch.arguments + [o_filename])
     lines = output.decode("utf-8").splitlines()
     return simplify_objdump(lines, arch, stack_differences=stack_differences)
 

@@ -1,7 +1,7 @@
 import difflib
 import hashlib
 import re
-from typing import Tuple, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 from collections import Counter
 
 from .objdump import ArchSettings, Line, objdump, get_arch
@@ -16,16 +16,24 @@ class Scorer:
     PENALTY_INSERTION = 100
     PENALTY_DELETION = 100
 
-    def __init__(self, target_o: str, *, stack_differences: bool, debug_mode: bool):
+    def __init__(
+        self,
+        target_o: str,
+        *,
+        stack_differences: bool,
+        algorithm: str,
+        debug_mode: bool,
+    ):
         self.target_o = target_o
         self.arch = get_arch(target_o)
         self.stack_differences = stack_differences
+        self.algorithm = algorithm
         self.debug_mode = debug_mode
         _, self.target_seq = self._objdump(target_o)
-        self.differ: difflib.SequenceMatcher[str] = difflib.SequenceMatcher(
+        self.difflib_differ: difflib.SequenceMatcher[str] = difflib.SequenceMatcher(
             autojunk=False
         )
-        self.differ.set_seq2([line.mnemonic for line in self.target_seq])
+        self.difflib_differ.set_seq2([line.mnemonic for line in self.target_seq])
 
     def _objdump(self, o_file: str) -> Tuple[str, List[Line]]:
         lines = objdump(o_file, self.arch, stack_differences=self.stack_differences)
@@ -88,7 +96,9 @@ class Scorer:
             # Probably regalloc difference, or signed vs unsigned
 
             # Compare each field in order
-            newfields, oldfields = new.split(","), old.split(",")
+            new_parts, old_parts = new.split(None, 1), old.split(None, 1)
+            newfields = new_parts[1].split(",") if len(new_parts) > 1 else []
+            oldfields = old_parts[1].split(",") if len(old_parts) > 1 else []
             if ignore_last_field:
                 newfields = newfields[:-1]
                 oldfields = oldfields[:-1]
@@ -97,8 +107,12 @@ class Scorer:
                 # we split that part out to make it a separate field
                 # however, we don't split if it has a proceeding %hi/%lo  e.g."%lo(.data)" or "%hi(.rodata + 0x10)"
                 re_paren = re.compile(r"(?<!%hi)(?<!%lo)\(")
-                oldfields = oldfields[:-1] + re_paren.split(oldfields[-1])
-                newfields = newfields[:-1] + re_paren.split(newfields[-1])
+                oldfields = oldfields[:-1] + (
+                    re_paren.split(oldfields[-1]) if len(oldfields) > 0 else []
+                )
+                newfields = newfields[:-1] + (
+                    re_paren.split(newfields[-1]) if len(newfields) > 0 else []
+                )
 
             for nf, of in zip(newfields, oldfields):
                 if nf != of:
@@ -119,8 +133,29 @@ class Scorer:
         def diff_delete(line: str) -> None:
             deletions.append(line)
 
-        self.differ.set_seq1([line.mnemonic for line in cand_seq])
-        result_diff = self.differ.get_opcodes()
+        result_diff: Sequence[tuple[str, int, int, int, int]]
+        if self.algorithm == "levenshtein":
+            import Levenshtein
+
+            remapping: Dict[str, str] = {}
+
+            def remap(seq: List[str]) -> str:
+                seq = seq[:]
+                for i in range(len(seq)):
+                    val = remapping.get(seq[i])
+                    if val is None:
+                        val = chr(len(remapping))
+                        remapping[seq[i]] = val
+                    seq[i] = val
+                return "".join(seq)
+
+            result_diff = Levenshtein.opcodes(
+                remap([line.mnemonic for line in cand_seq]),
+                remap([line.mnemonic for line in self.target_seq]),
+            )
+        else:
+            self.difflib_differ.set_seq1([line.mnemonic for line in cand_seq])
+            result_diff = self.difflib_differ.get_opcodes()
 
         for (tag, i1, i2, j1, j2) in result_diff:
             if tag == "equal":

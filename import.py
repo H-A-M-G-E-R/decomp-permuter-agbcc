@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import toml
+import fnmatch
 from typing import Callable, Dict, List, Match, Mapping, Optional, Pattern, Tuple
 import urllib.request
 import urllib.parse
@@ -42,7 +43,7 @@ cpp_cmd = homebrew_gcc_cpp() if is_macos else "cpp"
 make_cmd = "gmake" if is_macos else "make"
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
-prelude_file = os.path.join(dir_path, "prelude.inc")
+DEFAULT_ASM_PRELUDE_FILE = os.path.join(dir_path, "prelude.inc")
 
 DEFAULT_AS_CMDLINE: List[str] = ["mips-linux-gnu-as", "-march=vr4300", "-mabi=32"]
 
@@ -244,7 +245,12 @@ def fixup_build_command(
             for i, arg in enumerate(res)
             if any(
                 cmd in arg
-                for cmd in ["asm_processor", "asm-processor", "preprocess.py"]
+                for cmd in [
+                    "asm_processor",
+                    "asm-processor",
+                    "build.py",
+                    "preprocess.py",
+                ]
             )
         )
         ind1 = res.index("--", ind0 + 1)
@@ -657,7 +663,8 @@ def get_decompme_compiler_name(
 
     for path, compiler_name in compiler_mappings.items():
         assert isinstance(compiler_name, str)
-        if path == compiler_path:
+
+        if fnmatch.fnmatch(compiler_path, path):
             return compiler_name
 
     try:
@@ -678,13 +685,13 @@ def get_decompme_compiler_name(
     trail = "permuter_settings.toml, where ... is one of: " + ", ".join(available_ids)
     if compiler_mappings:
         print(
-            "Please add an entry:\n\n"
+            "Please add an entry: (wildcards allowed!)\n\n"
             f'"{compiler_path}" = "..."\n\n'
             f"to the [decompme.compilers] section of {trail}"
         )
     else:
         print(
-            "Please add a section:\n\n"
+            "Please add a section: (wildcards allowed!)\n\n"
             "[decompme.compilers]\n"
             f'"{compiler_path}" = "..."\n\n'
             f"to {trail}"
@@ -714,8 +721,9 @@ def write_compile_command(compiler: List[str], cwd: str, out_file: str) -> None:
     os.chmod(out_file, 0o755)
 
 
-def write_asm(asm_cont: str, out_file: str) -> None:
-    with open(prelude_file, "r") as p:
+def write_asm(asm_prelude_file: Optional[str], asm_cont: str, out_file: str) -> None:
+    asm_prelude_file = asm_prelude_file or DEFAULT_ASM_PRELUDE_FILE
+    with open(asm_prelude_file, "r") as p:
         asm_prelude = p.read()
     with open(out_file, "w", encoding="utf-8") as f:
         #f.write(asm_prelude)
@@ -775,7 +783,7 @@ def write_to_file(cont: str, filename: str) -> None:
         f.write(cont)
 
 
-def main() -> None:
+def main(arg_list: List[str]) -> None:
     parser = argparse.ArgumentParser(
         description="""Import a function for use with the permuter.
         Will create a new directory nonmatchings/<funcname>-<id>/."""
@@ -786,12 +794,12 @@ def main() -> None:
         Assumes that the file can be built with 'make' to create an .o file.""",
     )
     parser.add_argument(
-        "asm_file_or_func_name",
-        metavar="{asm_file|func_name}",
-        help="""File containing assembly for the function.
-        Must start with 'glabel <function_name>' and contain no other functions.
-        Alternatively, a function name can be given, which will be looked for in
-        all GLOBAL_ASM blocks in the C file.""",
+        "o_file",
+        help="""File containing the target object for the function.""",
+    )
+    parser.add_argument(
+        "func_name",
+        help="""The function to permute.""",
     )
     parser.add_argument(
         "make_flags",
@@ -821,14 +829,7 @@ def main() -> None:
         Note that regardless of this setting the permuter always removes all
         other functions by replacing them with declarations.""",
     )
-    parser.add_argument(
-        "--decompme",
-        dest="decompme",
-        action="store_true",
-        help="""Upload the function to decomp.me to share with other people,
-        instead of importing.""",
-    )
-    args = parser.parse_args()
+    args = parser.parse_args(arg_list)
 
     root_dir = find_root_dir(
         args.c_file, SETTINGS_FILES + ["Makefile", "makefile", "build.ninja"]
@@ -846,15 +847,26 @@ def main() -> None:
                 settings = toml.load(f)
             break
 
-    compiler_type = settings.get("compiler_type", "base")
-    build_system = settings.get("build_system", "make")
-    compiler = settings.get("compiler_command")
-    assembler = settings.get("assembler_command")
+    def get_setting(key: str) -> Optional[str]:
+        value = settings.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            print(
+                f"Value of {key} in settings.toml must be a string, but found: {value}"
+            )
+            sys.exit(1)
+        return value
+
+    build_system_raw = get_setting("build_system")
+    build_system = build_system_raw or "make"
+    compiler_str = get_setting("compiler_command") or ""
+    assembler_str = get_setting("assembler_command") or ""
+    asm_prelude_file = get_setting("asm_prelude_file")
     make_flags = args.make_flags
 
-    compiler_type = settings.get("compiler_type")
+    compiler_type = get_setting("compiler_type")
     if compiler_type is not None:
-        assert isinstance(compiler_type, str)
         print(f"Compiler type: {compiler_type}")
     else:
         compiler_type = "base"
@@ -864,18 +876,16 @@ def main() -> None:
             "please set 'compiler_type' in this project's permuter_settings.toml."
         )
 
-    func_name, asm_cont = parse_asm(root_dir, args.c_file, args.asm_file_or_func_name)
+    func_name = args.func_name
     print(f"Function name: {func_name}")
 
-    if compiler or assembler:
-        assert isinstance(compiler, str)
-        assert isinstance(assembler, str)
-        assert settings.get("build_system") is None
-
-        compiler = shlex.split(compiler)
-        assembler = shlex.split(assembler)
+    if compiler_str or assembler_str:
+        assert (
+            build_system_raw is None
+        ), "Must not specify both build system and compiler/assembler"
+        compiler = shlex.split(compiler_str)
+        assembler = shlex.split(assembler_str)
     else:
-        assert isinstance(build_system, str)
         compiler, assembler = find_build_command_line(
             root_dir, args.c_file, make_flags, build_system
         )
@@ -888,42 +898,11 @@ def main() -> None:
     )
     source = import_c_file(compiler, root_dir, args.c_file, preserve_macros)
 
-    if args.decompme:
-        api_base = os.environ.get("DECOMPME_API_BASE", "https://decomp.me")
-        compiler_name = get_decompme_compiler_name(compiler, settings, api_base)
-        source, context = prune_and_separate_context(source, args.prune, func_name)
-        print("Uploading...")
-        try:
-            post_data = urllib.parse.urlencode(
-                {
-                    "name": func_name,
-                    "target_asm": asm_cont,
-                    "context": context,
-                    "source_code": source,
-                    "compiler": compiler_name,
-                    "compiler_flags": get_compiler_flags(compiler),
-                    "diff_label": func_name,
-                }
-            ).encode("ascii")
-            with urllib.request.urlopen(f"{api_base}/api/scratch", post_data) as f:
-                resp = f.read()
-                json_data: Dict[str, str] = json.loads(resp)
-                if "slug" in json_data:
-                    slug = json_data["slug"]
-                    print(f"https://decomp.me/scratch/{slug}")
-                else:
-                    error = json_data.get("error", resp)
-                    print(f"Server error: {error}")
-        except Exception as e:
-            print(e)
-        return
-
     source, compilable_source = prune_source(source, args.prune, func_name)
 
     dirname = create_directory(func_name)
     base_c_file = f"{dirname}/base.c"
     base_o_file = f"{dirname}/base.o"
-    target_s_file = f"{dirname}/target.s"
     target_o_file = f"{dirname}/target.o"
     compile_script = f"{dirname}/compile.sh"
     settings_file = f"{dirname}/settings.toml"
@@ -932,8 +911,7 @@ def main() -> None:
         write_to_file(source, base_c_file)
         create_write_settings_toml(func_name, compiler_type, settings_file)
         write_compile_command(compiler, root_dir, compile_script)
-        write_asm(asm_cont, target_s_file)
-        compile_asm(assembler, root_dir, target_s_file, target_o_file)
+        shutil.copy(args.o_file, target_o_file)
         if compilable_source is not None:
             compile_base(compile_script, compilable_source, base_c_file, base_o_file)
     except:
@@ -946,4 +924,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
